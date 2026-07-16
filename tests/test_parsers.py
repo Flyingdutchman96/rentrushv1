@@ -185,6 +185,49 @@ class ParserTests(unittest.TestCase):
             listings = cleaned_store.query_listings({"city": "berlin", "sources": ["immowelt"], "propertyType": "any"})
             self.assertEqual(listings, [])
 
+    def test_account_saved_search_stores_matches_and_listing_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = ListingStore(Path(temp_dir) / "rentals.sqlite3")
+            user = store.create_user("Student@example.com", "verysecret")
+            self.assertEqual(user["email"], "student@example.com")
+            self.assertIsNotNone(store.authenticate_user("student@example.com", "verysecret"))
+            token = store.create_session(user["id"])
+            self.assertEqual(store.get_user_by_session(token)["email"], "student@example.com")
+
+            search = store.create_saved_search(
+                user["id"],
+                "Berlin room",
+                {"city": "berlin", "sources": ["wg_gesucht"], "propertyType": "room"},
+            )
+            listing = Listing(
+                source="wg_gesucht",
+                title="Quiet room near campus",
+                url="https://www.wg-gesucht.de/wg-zimmer-in-Berlin.123.html",
+                city_id="berlin",
+                listing_type="room",
+                rent_eur=620,
+                location="Berlin",
+            )
+            store.upsert_listings([listing])
+            matches = store.query_listings(search["filters"])
+            new_ids = store.save_search_matches(user["id"], search["id"], matches)
+            self.assertEqual(new_ids, [listing.id])
+
+            results = store.get_saved_search_results(user["id"], search["id"])
+            self.assertEqual(len(results), 1)
+            self.assertTrue(results[0]["is_new"])
+            store.set_listing_state(
+                user["id"],
+                listing.id,
+                {"favorite": True, "hidden": False, "status": "contacted", "note": "Ask about Anmeldung."},
+            )
+            updated = store.get_saved_search_results(user["id"], search["id"])[0]
+            self.assertEqual(updated["account_status"], "contacted")
+            self.assertTrue(updated["favorite"])
+            self.assertEqual(updated["note"], "Ask about Anmeldung.")
+            store.mark_search_results_seen(user["id"], search["id"])
+            self.assertEqual(store.account_summary(user["id"])["unseenCount"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

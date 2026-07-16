@@ -19,7 +19,6 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 REQUEST_TIMEOUT_SECONDS = 14
-MAX_LISTINGS_PER_SOURCE = 30
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 SKIP_TAGS = {"script", "style", "noscript", "svg"}
 
@@ -250,23 +249,23 @@ def parse_area(text: str) -> float | None:
 
 
 def parse_rooms(text: str) -> float | None:
-    match = re.search(r"([0-9]+(?:[,.][0-9]+)?)\s*(?:Zi\.?|Zimmer|rooms?)\b", text, flags=re.I)
+    match = re.search(r"([0-9]+(?:[,.][0-9]+)?)\s*(?:Zi\.?|Zimmer|rooms?|kamers?|slaapkamers?)\b", text, flags=re.I)
     if match:
         rooms = parse_number(match.group(1))
         if rooms is not None and 0 < rooms <= 20:
             return rooms
-    if re.search(r"\b(private room|shared room|wg-zimmer|zimmer in)\b", text, flags=re.I):
+    if re.search(r"\b(private room|shared room|wg-zimmer|zimmer in|kamer|room)\b", text, flags=re.I):
         return 1.0
     return None
 
 
 def infer_listing_type(text: str, fallback: str = "any") -> str:
     haystack = text.lower()
-    if re.search(r"\b(haus|house|reihenhaus|doppelhaushälfte|doppelhaushaelfte)\b", haystack):
+    if re.search(r"\b(haus|house|huis|woonhuis|eengezinswoning|reihenhaus|doppelhaushälfte|doppelhaushaelfte)\b", haystack):
         return "house"
-    if any(token in haystack for token in ["wohnung", "apartment", "studio", "flat", "maisonette"]):
+    if any(token in haystack for token in ["wohnung", "apartment", "appartement", "studio", "flat", "maisonette"]):
         return "apartment"
-    if any(token in haystack for token in ["wg-zimmer", "private room", "shared room", "student residence", "room in", "zimmer"]):
+    if any(token in haystack for token in ["wg-zimmer", "private room", "shared room", "student residence", "room in", "zimmer", "kamer"]):
         return "room"
     return fallback if fallback != "any" else "apartment"
 
@@ -553,7 +552,7 @@ class RentalSource:
             except Exception as exc:  # Network and remote HTML errors should not break the whole app.
                 statuses.append(SourceStatus(self.key, False, f"{type(exc).__name__}: {exc}", 0, url))
             time.sleep(0.35)
-        return SourceResult(dedupe_listings(listings)[:MAX_LISTINGS_PER_SOURCE], statuses)
+        return SourceResult(dedupe_listings(listings), statuses)
 
 
 class KleinanzeigenSource(RentalSource):
@@ -727,7 +726,7 @@ class WGGesuchtSource(RentalSource):
 
 
 class HousingAnywhereSource(RentalSource):
-    key = "housinganywhere"
+    key = "housinganywhere_de"
 
     def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
         return [("any", f"https://housinganywhere.com/s/{city.housinganywhere_slug}")]
@@ -748,12 +747,131 @@ class HousingAnywhereSource(RentalSource):
         return [make_listing(self.key, city, card, fallback_type) for card in cards]
 
 
+class HousingAnywhereNLSource(HousingAnywhereSource):
+    key = "housinganywhere_nl"
+
+
+class FundaSource(RentalSource):
+    key = "funda"
+
+    def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
+        if not city.funda_area:
+            return []
+        return [("any", f"https://www.funda.nl/zoeken/huur/?selected_area={city.funda_area}")]
+
+    def parse(self, html: str, base_url: str, city: City, fallback_type: str) -> list[Listing]:
+        def is_listing(url: str) -> bool:
+            return "funda.nl" in url and (
+                "/detail/huur/" in url
+                or re.search(r"/huur/[^/?#]+/(?:appartement|huis|kamer|studio)-", url) is not None
+            )
+
+        cards = collect_listing_anchors(html, base_url, is_listing)
+        return [make_listing(self.key, city, card, fallback_type) for card in cards]
+
+
+class ParariusSource(RentalSource):
+    key = "pararius"
+
+    def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
+        if not city.nl_slug:
+            return []
+        return [("any", f"https://www.pararius.nl/huurwoningen/{city.nl_slug}")]
+
+    def parse(self, html: str, base_url: str, city: City, fallback_type: str) -> list[Listing]:
+        def is_listing(url: str) -> bool:
+            return "pararius.nl" in url and re.search(r"/(?:appartement|huis|kamer|studio)-te-huur/", url) is not None
+
+        cards = collect_listing_anchors(html, base_url, is_listing)
+        if not cards:
+            cards = collect_listing_anchors(html, base_url, lambda url: "pararius.nl" in url and "te-huur" in url)
+        return [make_listing(self.key, city, card, fallback_type) for card in cards]
+
+
+class KamernetSource(RentalSource):
+    key = "kamernet"
+
+    def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
+        if not city.nl_slug:
+            return []
+        urls: list[tuple[str, str]] = []
+        for kind in selected_kinds(filters):
+            if kind == "room":
+                urls.append(("room", f"https://kamernet.nl/en/for-rent/room-{city.nl_slug}"))
+            elif kind == "apartment":
+                urls.append(("apartment", f"https://kamernet.nl/en/for-rent/apartment-{city.nl_slug}"))
+                urls.append(("apartment", f"https://kamernet.nl/en/for-rent/studio-{city.nl_slug}"))
+            elif kind == "house":
+                urls.append(("house", f"https://kamernet.nl/en/for-rent/house-{city.nl_slug}"))
+        return urls
+
+    def parse(self, html: str, base_url: str, city: City, fallback_type: str) -> list[Listing]:
+        def is_listing(url: str) -> bool:
+            return "kamernet.nl" in url and "/en/for-rent/" in url and re.search(r"/(?:room|apartment|studio|house)-", url) is not None
+
+        cards = collect_listing_anchors(html, base_url, is_listing)
+        return [make_listing(self.key, city, card, fallback_type) for card in cards]
+
+
+class HuurwoningenSource(RentalSource):
+    key = "huurwoningen"
+
+    def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
+        if not city.nl_slug:
+            return []
+        return [("any", f"https://www.huurwoningen.nl/in/{city.nl_slug}/")]
+
+    def parse(self, html: str, base_url: str, city: City, fallback_type: str) -> list[Listing]:
+        def is_listing(url: str) -> bool:
+            return "huurwoningen.nl" in url and re.search(r"/(?:appartement|huis|kamer|studio)-huren/", url) is not None
+
+        cards = collect_listing_anchors(html, base_url, is_listing)
+        if not cards:
+            cards = collect_listing_anchors(html, base_url, lambda url: "huurwoningen.nl" in url and "-huren/" in url)
+        return [make_listing(self.key, city, card, fallback_type) for card in cards]
+
+
+class DirectWonenSource(RentalSource):
+    key = "directwonen"
+
+    def build_urls(self, city: City, filters: dict) -> list[tuple[str, str]]:
+        if not city.nl_slug:
+            return []
+        paths = {
+            "apartment": "appartement-huren",
+            "room": "kamer-huren",
+            "house": "huurwoningen-huren",
+        }
+        if filters.get("propertyType", "any") == "any":
+            return [("any", f"https://directwonen.nl/huurwoningen-huren/{city.nl_slug}")]
+        return [
+            (kind, f"https://directwonen.nl/{paths[kind]}/{city.nl_slug}")
+            for kind in selected_kinds(filters)
+            if kind in paths
+        ]
+
+    def parse(self, html: str, base_url: str, city: City, fallback_type: str) -> list[Listing]:
+        def is_listing(url: str) -> bool:
+            return "directwonen.nl" in url and re.search(r"/(?:huurwoning|appartement|kamer|studio)-huren/", url) is not None
+
+        cards = collect_listing_anchors(html, base_url, is_listing)
+        if not cards:
+            cards = collect_listing_anchors(html, base_url, lambda url: "directwonen.nl" in url and "huren" in url)
+        return [make_listing(self.key, city, card, fallback_type) for card in cards]
+
+
 SOURCES: dict[str, RentalSource] = {
     "kleinanzeigen": KleinanzeigenSource(),
     "immoscout": ImmoScoutSource(),
     "immowelt": ImmoweltSource(),
     "wg_gesucht": WGGesuchtSource(),
-    "housinganywhere": HousingAnywhereSource(),
+    "housinganywhere_de": HousingAnywhereSource(),
+    "funda": FundaSource(),
+    "pararius": ParariusSource(),
+    "kamernet": KamernetSource(),
+    "huurwoningen": HuurwoningenSource(),
+    "directwonen": DirectWonenSource(),
+    "housinganywhere_nl": HousingAnywhereNLSource(),
 }
 
 

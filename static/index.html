@@ -13,13 +13,22 @@
           <h1>German Rental Watch</h1>
           <p id="city-note">Local watcher for difficult student rental markets.</p>
         </div>
-        <div class="watch-state">
-          <span id="watch-indicator" class="dot idle"></span>
-          <span id="watch-label">Idle</span>
+        <div class="top-actions">
+          <button id="topCreateAccount" class="account-top-button" type="button">Create account</button>
+          <button id="topSignIn" class="account-top-button" type="button">Sign in</button>
+          <div class="watch-state">
+            <span id="watch-indicator" class="dot idle"></span>
+            <span id="watch-label">Idle</span>
+          </div>
+          <span id="account-chip" class="account-chip">Guest mode</span>
         </div>
       </header>
 
       <section class="controls" aria-label="Search filters">
+        <label>
+          Country
+          <select id="country"></select>
+        </label>
         <label>
           City
           <select id="city"></select>
@@ -64,6 +73,97 @@
 
       <section id="notice" class="notice" aria-live="polite"></section>
 
+      <section class="account-panel" aria-label="Account">
+        <div id="auth-guest" class="account-guest">
+          <div class="account-intro">
+            <div>
+              <h2>Account</h2>
+              <p>Search anonymously, or create an account to keep your rental hunt organized.</p>
+            </div>
+            <div class="account-benefits">
+              <span>Save searches</span>
+              <span>Store matches</span>
+              <span>Favorite listings</span>
+              <span>Track applications</span>
+              <span>Private notes</span>
+              <span>Browser alerts</span>
+            </div>
+            <div class="account-cta">
+              <button id="introCreateAccount" type="button">Create account</button>
+              <button id="introSignIn" type="button">Sign in</button>
+            </div>
+          </div>
+
+          <div id="auth-form" class="auth-grid hidden">
+            <div>
+              <h2 id="authModeTitle">Create account</h2>
+              <p>Email and password are used only for this app account.</p>
+            </div>
+          <label>
+            Email
+            <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com">
+          </label>
+          <label>
+            Password
+            <input id="authPassword" type="password" autocomplete="current-password" minlength="8" placeholder="8+ characters">
+          </label>
+          <div class="auth-actions">
+            <button id="loginButton" type="button">Sign in</button>
+            <button id="registerButton" type="button">Create account</button>
+          </div>
+          </div>
+        </div>
+
+        <div id="auth-user" class="account-dashboard hidden">
+          <div class="account-head">
+            <div>
+              <h2 id="accountEmail">Account</h2>
+              <p id="accountSummary">No saved searches yet.</p>
+            </div>
+            <button id="logoutButton" type="button">Sign out</button>
+          </div>
+
+          <div class="save-search-row">
+            <label>
+              Search name
+              <input id="saveSearchName" type="text" maxlength="90" placeholder="Berlin rooms under 700">
+            </label>
+            <label class="check-label">
+              <input id="accountNotificationsEnabled" type="checkbox" checked>
+              Browser notifications
+            </label>
+            <button id="saveSearch" type="button">Save current search</button>
+          </div>
+
+          <div id="saved-searches" class="saved-search-list empty">No saved searches yet.</div>
+        </div>
+      </section>
+
+      <section id="admin-panel" class="admin-panel hidden" aria-label="Admin dashboard">
+        <div class="admin-head">
+          <div>
+            <h2>Admin Dashboard</h2>
+            <p>Operational view for users, searches, stored matches, source coverage, and background watchers.</p>
+          </div>
+          <button id="refreshAdmin" type="button">Refresh admin data</button>
+        </div>
+        <div id="admin-stats" class="admin-stats"></div>
+        <div class="admin-grid">
+          <section>
+            <h3>Recent Users</h3>
+            <div id="admin-users" class="admin-list empty">No admin data loaded.</div>
+          </section>
+          <section>
+            <h3>Saved Searches</h3>
+            <div id="admin-searches" class="admin-list empty">No admin data loaded.</div>
+          </section>
+          <section>
+            <h3>Source Coverage</h3>
+            <div id="admin-sources" class="admin-list empty">No admin data loaded.</div>
+          </section>
+        </div>
+      </section>
+
       <section class="status-grid" aria-label="Status">
         <div>
           <strong id="result-count">0</strong>
@@ -97,6 +197,30 @@
               <option value="rent">Lowest rent</option>
               <option value="size">Largest size</option>
             </select>
+          </div>
+          <div id="account-result-tools" class="account-result-tools hidden">
+            <label>
+              Status
+              <select id="accountStatusFilter">
+                <option value="">All statuses</option>
+                <option value="new">New</option>
+                <option value="interested">Interested</option>
+                <option value="contacted">Contacted</option>
+                <option value="viewing">Viewing</option>
+                <option value="applied">Applied</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </label>
+            <label class="check-label">
+              <input id="accountFavoritesOnly" type="checkbox">
+              Favorites only
+            </label>
+            <label class="check-label">
+              <input id="accountShowHidden" type="checkbox">
+              Show hidden
+            </label>
+            <button id="exportResults" type="button">Export CSV</button>
+            <button id="copyDigest" type="button">Copy summary</button>
           </div>
           <div id="listings" class="listing-list empty">Run a check to populate listings.</div>
         </section>

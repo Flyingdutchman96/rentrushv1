@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from http.cookies import SimpleCookie
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -12,13 +13,15 @@ from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from rent_watch.checker import DEFAULT_SOURCES, RentalChecker
-from rent_watch.config import CITIES, PROPERTY_TYPES, SOURCE_LABELS
+from rent_watch.config import CITIES, COUNTRIES, DEFAULT_SOURCES_BY_COUNTRY, PROPERTY_TYPES, SOURCE_COUNTRIES, SOURCE_LABELS, city_by_id
 from rent_watch.storage import ListingStore
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = ROOT / "data"
+SESSION_COOKIE_NAME = "rent_session"
+SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
 
 def parse_json_body(handler: BaseHTTPRequestHandler) -> dict:
@@ -31,6 +34,14 @@ def parse_json_body(handler: BaseHTTPRequestHandler) -> dict:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def session_cookie(token: str) -> str:
+    return f"{SESSION_COOKIE_NAME}={token}; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax"
+
+
+def clear_session_cookie() -> str:
+    return f"{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
 
 
 def result_key(result: dict | None) -> str | None:
@@ -133,16 +144,95 @@ class BackgroundWatcher:
                 break
 
 
+class AccountSearchWatcher:
+    def __init__(self, state: "AppState") -> None:
+        self.state = state
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._checking = False
+        self._last_error: str | None = None
+        self._last_started: str | None = None
+        self._last_finished: str | None = None
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop_event = threading.Event()
+            self._thread = threading.Thread(target=self._run_loop, name="account-search-watch", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            thread = self._thread
+            if thread and thread.is_alive():
+                self._stop_event.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "running": self._thread is not None and self._thread.is_alive(),
+                "checking": self._checking,
+                "lastStarted": self._last_started,
+                "lastFinished": self._last_finished,
+                "lastError": self._last_error,
+            }
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            due_searches = self.state.store.due_saved_searches()
+            for search in due_searches:
+                if self._stop_event.is_set():
+                    break
+                with self._lock:
+                    self._checking = True
+                    self._last_started = utc_now()
+                try:
+                    self.state.run_saved_search(int(search["userId"]), int(search["id"]))
+                    with self._lock:
+                        self._last_error = None
+                except Exception as exc:
+                    with self._lock:
+                        self._last_error = f"{type(exc).__name__}: {exc}"
+                finally:
+                    with self._lock:
+                        self._checking = False
+                        self._last_finished = utc_now()
+            self._stop_event.wait(5)
+
+
 class AppState:
     def __init__(self, db_path: Path) -> None:
         self.store = ListingStore(db_path)
         self.checker = RentalChecker(self.store)
         self._check_lock = threading.Lock()
         self.watcher = BackgroundWatcher(self)
+        self.account_watcher = AccountSearchWatcher(self)
+        self.account_watcher.start()
 
     def run_check(self, filters: dict) -> dict:
         with self._check_lock:
             return self.checker.run(filters)
+
+    def run_saved_search(self, user_id: int, search_id: int) -> dict:
+        search = self.store.get_saved_search(user_id, search_id)
+        if not search:
+            raise KeyError("Saved search not found.")
+        with self._check_lock:
+            result = self.checker.run(search["filters"])
+            account_new_ids = self.store.save_search_matches(user_id, search_id, result.get("listings", []))
+        result["savedSearchId"] = search_id
+        result["savedSearchName"] = search["name"]
+        result["accountNewCount"] = len(account_new_ids)
+        result["accountNewListingIds"] = account_new_ids
+        return result
+
+    def close(self) -> None:
+        self.watcher.stop()
+        self.account_watcher.stop()
 
 
 class RentalWatchHandler(BaseHTTPRequestHandler):
@@ -153,32 +243,64 @@ class RentalWatchHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         print(f"{self.address_string()} - {format % args}")
 
-    def send_json(self, payload: dict, status: int = 200) -> None:
+    def send_json(self, payload: dict, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def session_token(self) -> str | None:
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = cookie.get(SESSION_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def current_user(self) -> dict | None:
+        return self.state.store.get_user_by_session(self.session_token())
+
+    def require_user(self) -> dict | None:
+        user = self.current_user()
+        if not user:
+            self.send_json({"error": "Sign in required."}, 401)
+            return None
+        return user
+
+    def require_admin(self) -> dict | None:
+        user = self.require_user()
+        if not user:
+            return None
+        if not user.get("isAdmin"):
+            self.send_json({"error": "Admin access required."}, 403)
+            return None
+        return user
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/config":
             self.send_json(
                 {
+                    "countries": [{"id": key, "name": value} for key, value in COUNTRIES.items()],
                     "cities": [
                         {
                             "id": city.id,
+                            "country": city.country,
                             "name": city.name,
                             "pressureNote": city.pressure_note,
                         }
                         for city in CITIES
                     ],
-                    "sources": [{"id": key, "name": label} for key, label in SOURCE_LABELS.items()],
+                    "sources": [
+                        {"id": key, "name": label, "country": SOURCE_COUNTRIES.get(key)}
+                        for key, label in SOURCE_LABELS.items()
+                    ],
                     "propertyTypes": [{"id": key, "name": label} for key, label in PROPERTY_TYPES.items()],
                     "defaults": {
+                        "country": "de",
                         "city": "berlin",
-                        "sources": DEFAULT_SOURCES,
+                        "sources": DEFAULT_SOURCES_BY_COUNTRY,
                         "propertyType": "any",
                         "pollSeconds": 30,
                     },
@@ -187,9 +309,15 @@ class RentalWatchHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/listings":
             params = parse_qs(parsed.query)
+            city_id = params.get("city", ["berlin"])[0]
+            try:
+                city = city_by_id(city_id)
+                default_sources = DEFAULT_SOURCES_BY_COUNTRY.get(city.country, DEFAULT_SOURCES)
+            except KeyError:
+                default_sources = DEFAULT_SOURCES
             filters = {
-                "city": params.get("city", ["berlin"])[0],
-                "sources": params.get("sources", [",".join(DEFAULT_SOURCES)])[0].split(","),
+                "city": city_id,
+                "sources": params.get("sources", [",".join(default_sources)])[0].split(","),
                 "propertyType": params.get("propertyType", ["any"])[0],
                 "maxRent": params.get("maxRent", [""])[0],
                 "minRooms": params.get("minRooms", [""])[0],
@@ -200,6 +328,56 @@ class RentalWatchHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/health":
             self.send_json({"ok": True})
+            return
+        if parsed.path == "/api/me":
+            user = self.current_user()
+            self.send_json(
+                {
+                    "user": user,
+                    "summary": self.state.store.account_summary(user["id"]) if user else None,
+                    "accountWatcher": self.state.account_watcher.status(),
+                }
+            )
+            return
+        if parsed.path == "/api/account/searches":
+            user = self.require_user()
+            if not user:
+                return
+            self.send_json(
+                {
+                    "searches": self.state.store.list_saved_searches(user["id"]),
+                    "summary": self.state.store.account_summary(user["id"]),
+                    "watcher": self.state.account_watcher.status(),
+                }
+            )
+            return
+        if parsed.path == "/api/account/search-results":
+            user = self.require_user()
+            if not user:
+                return
+            params = parse_qs(parsed.query)
+            search_id = int(params.get("searchId", ["0"])[0] or 0)
+            if not self.state.store.get_saved_search(user["id"], search_id):
+                self.send_json({"error": "Saved search not found."}, 404)
+                return
+            self.send_json({"results": self.state.store.get_saved_search_results(user["id"], search_id)})
+            return
+        if parsed.path == "/api/account/notifications":
+            user = self.require_user()
+            if not user:
+                return
+            self.send_json({"items": self.state.store.account_notifications(user["id"])})
+            return
+        if parsed.path == "/api/admin/overview":
+            if not self.require_admin():
+                return
+            self.send_json(
+                {
+                    **self.state.store.admin_overview(),
+                    "accountWatcher": self.state.account_watcher.status(),
+                    "globalWatcher": self.state.watcher.status(include_result=False),
+                }
+            )
             return
         if parsed.path == "/api/watch/status":
             params = parse_qs(parsed.query)
@@ -212,6 +390,23 @@ class RentalWatchHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             payload = parse_json_body(self)
+            if parsed.path == "/api/auth/register":
+                user = self.state.store.create_user(payload.get("email", ""), payload.get("password", ""))
+                token = self.state.store.create_session(user["id"])
+                self.send_json({"user": user, "summary": self.state.store.account_summary(user["id"])}, headers=[("Set-Cookie", session_cookie(token))])
+                return
+            if parsed.path == "/api/auth/login":
+                user = self.state.store.authenticate_user(payload.get("email", ""), payload.get("password", ""))
+                if not user:
+                    self.send_json({"error": "Invalid email or password."}, 401)
+                    return
+                token = self.state.store.create_session(user["id"])
+                self.send_json({"user": user, "summary": self.state.store.account_summary(user["id"])}, headers=[("Set-Cookie", session_cookie(token))])
+                return
+            if parsed.path == "/api/auth/logout":
+                self.state.store.delete_session(self.session_token())
+                self.send_json({"ok": True}, headers=[("Set-Cookie", clear_session_cookie())])
+                return
             if parsed.path == "/api/check":
                 self.send_json(self.state.run_check(payload))
                 return
@@ -226,7 +421,63 @@ class RentalWatchHandler(BaseHTTPRequestHandler):
                 ids = payload.get("ids")
                 self.send_json({"updated": self.state.store.mark_seen(ids)})
                 return
+            if parsed.path == "/api/account/searches":
+                user = self.require_user()
+                if not user:
+                    return
+                search = self.state.store.create_saved_search(
+                    user["id"],
+                    payload.get("name", ""),
+                    payload.get("filters", {}),
+                    int(payload.get("intervalSeconds", 30) or 30),
+                    bool(payload.get("notificationsEnabled", True)),
+                )
+                self.send_json({"search": search, "summary": self.state.store.account_summary(user["id"])}, 201)
+                return
+            if parsed.path == "/api/account/searches/update":
+                user = self.require_user()
+                if not user:
+                    return
+                search = self.state.store.update_saved_search(user["id"], int(payload.get("id", 0) or 0), payload)
+                self.send_json({"search": search, "summary": self.state.store.account_summary(user["id"])})
+                return
+            if parsed.path == "/api/account/searches/delete":
+                user = self.require_user()
+                if not user:
+                    return
+                deleted = self.state.store.delete_saved_search(user["id"], int(payload.get("id", 0) or 0))
+                self.send_json({"deleted": deleted, "summary": self.state.store.account_summary(user["id"])})
+                return
+            if parsed.path == "/api/account/searches/run":
+                user = self.require_user()
+                if not user:
+                    return
+                result = self.state.run_saved_search(user["id"], int(payload.get("id", 0) or 0))
+                self.send_json(result)
+                return
+            if parsed.path == "/api/account/search-results/seen":
+                user = self.require_user()
+                if not user:
+                    return
+                updated = self.state.store.mark_search_results_seen(
+                    user["id"],
+                    int(payload.get("searchId", 0) or 0),
+                    payload.get("listingIds"),
+                )
+                self.send_json({"updated": updated, "summary": self.state.store.account_summary(user["id"])})
+                return
+            if parsed.path == "/api/account/listing-state":
+                user = self.require_user()
+                if not user:
+                    return
+                state = self.state.store.set_listing_state(user["id"], str(payload.get("listingId", "")), payload)
+                self.send_json({"state": state, "summary": self.state.store.account_summary(user["id"])})
+                return
             self.send_json({"error": "Not found"}, 404)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, 400)
+        except KeyError as exc:
+            self.send_json({"error": str(exc).strip("'")}, 404)
         except Exception as exc:
             self.send_json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
@@ -258,7 +509,8 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=DATA_DIR / "rentals.sqlite3")
     args = parser.parse_args()
 
-    RentalWatchHandler.state = AppState(args.db)
+    state = AppState(args.db)
+    RentalWatchHandler.state = state
     server = ThreadingHTTPServer((args.host, args.port), RentalWatchHandler)
     print(f"Rental Watch is running at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
@@ -267,6 +519,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping Rental Watch.")
     finally:
+        state.close()
         server.server_close()
 
 

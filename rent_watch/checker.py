@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .config import SOURCE_LABELS, city_by_id
+from .config import DEFAULT_SOURCES_BY_COUNTRY, SOURCE_COUNTRIES, SOURCE_LABELS, city_by_id
 from .sources import SOURCES, SourceStatus, dedupe_listings
 from .storage import ListingStore
 
 
-DEFAULT_SOURCES = ["kleinanzeigen", "immowelt", "wg_gesucht", "housinganywhere"]
+DEFAULT_SOURCES = DEFAULT_SOURCES_BY_COUNTRY["de"]
 
 
 class RentalChecker:
@@ -17,7 +17,12 @@ class RentalChecker:
     def run(self, filters: dict) -> dict:
         city_id = filters.get("city") or "berlin"
         city = city_by_id(city_id)
-        selected_sources = [source for source in filters.get("sources", DEFAULT_SOURCES) if source in SOURCES]
+        default_sources = DEFAULT_SOURCES_BY_COUNTRY.get(city.country, DEFAULT_SOURCES)
+        selected_sources = [
+            source
+            for source in filters.get("sources", default_sources)
+            if source in SOURCES and SOURCE_COUNTRIES.get(source) == city.country
+        ]
         filters = {**filters, "city": city_id, "sources": selected_sources}
 
         existing_before = self.store.count_existing(city_id, selected_sources)
