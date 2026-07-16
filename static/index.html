@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>German Rental Watch</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>German Rental Watch</h1>
+          <p id="city-note">Local watcher for difficult student rental markets.</p>
+        </div>
+        <div class="watch-state">
+          <span id="watch-indicator" class="dot idle"></span>
+          <span id="watch-label">Idle</span>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Search filters">
+        <label>
+          City
+          <select id="city"></select>
+        </label>
+        <label>
+          Type
+          <select id="propertyType"></select>
+        </label>
+        <label>
+          Max rent
+          <input id="maxRent" inputmode="numeric" type="number" min="0" step="50" placeholder="EUR">
+        </label>
+        <label>
+          Min rooms
+          <input id="minRooms" inputmode="decimal" type="number" min="0" step="0.5" placeholder="Any">
+        </label>
+        <label>
+          Min size
+          <input id="minArea" inputmode="numeric" type="number" min="0" step="5" placeholder="m2">
+        </label>
+        <label>
+          Keyword
+          <input id="keyword" type="search" placeholder="balcony, furnished, WBS">
+        </label>
+        <label>
+          Poll seconds
+          <input id="pollSeconds" inputmode="numeric" type="number" min="30" max="300" step="30" value="30">
+        </label>
+      </section>
+
+      <section class="source-row" aria-label="Sources">
+        <div id="sources" class="source-list"></div>
+      </section>
+
+      <section class="actions" aria-label="Actions">
+        <button id="checkNow" type="button">Check now</button>
+        <button id="startWatch" type="button">Start watching</button>
+        <button id="stopWatch" type="button" disabled>Stop</button>
+        <button id="enableNotifications" type="button">Enable notifications</button>
+        <button id="markSeen" type="button">Mark all seen</button>
+      </section>
+
+      <section id="notice" class="notice" aria-live="polite"></section>
+
+      <section class="status-grid" aria-label="Status">
+        <div>
+          <strong id="result-count">0</strong>
+          <span>matching listings</span>
+        </div>
+        <div>
+          <strong id="new-count">0</strong>
+          <span>new this check</span>
+        </div>
+        <div>
+          <strong id="fetched-count">0</strong>
+          <span>fetched</span>
+        </div>
+        <div>
+          <strong id="last-check">Never</strong>
+          <span>last check</span>
+        </div>
+      </section>
+
+      <section class="split">
+        <aside class="panel">
+          <h2>Source health</h2>
+          <div id="source-status" class="source-status empty">No checks yet.</div>
+        </aside>
+
+        <section class="panel results-panel">
+          <div class="results-head">
+            <h2>Listings</h2>
+            <select id="sortMode" aria-label="Sort listings">
+              <option value="newest">Newest seen</option>
+              <option value="rent">Lowest rent</option>
+              <option value="size">Largest size</option>
+            </select>
+          </div>
+          <div id="listings" class="listing-list empty">Run a check to populate listings.</div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

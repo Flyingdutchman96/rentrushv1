@@ -1,0 +1,2 @@
+"""Local rental listing watcher."""
+
